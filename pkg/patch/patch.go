@@ -322,12 +322,14 @@ func patchWithContext(ctx context.Context, ch chan error, image, reportFile, rep
 				}
 			} else {
 				// get package manager based on os family type
-				osType, osVersion, err := determineOSFamily(ctx, c, config)
+				if updates.Metadata.OS.Type == "" || updates.Metadata.OS.Version == "" {
+					updates.Metadata.OS.Type, updates.Metadata.OS.Version, err = determineOSFamily(ctx, c, config)
+				}
 				if err != nil {
 					ch <- err
 					return nil, err
 				}
-				manager, err = pkgmgr.GetPackageManager(osType, osVersion, config, workingFolder)
+				manager, err = pkgmgr.GetPackageManager(updates.Metadata.OS.Type, updates.Metadata.OS.Version, config, workingFolder)
 				if err != nil {
 					ch <- err
 					return nil, err

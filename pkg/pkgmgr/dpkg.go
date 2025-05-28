@@ -177,6 +177,8 @@ func (dm *dpkgManager) InstallUpdates(ctx context.Context, manifest *unversioned
 		return nil, nil, err
 	}
 
+	updatedImageState, resultManifestBytes, err = dm.upgradeOS(ctx)
+
 	return updatedImageState, errPkgs, nil
 }
 
@@ -306,6 +308,53 @@ func GetPackageInfo(file string) (string, string, error) {
 	}
 
 	return packageName, packageVersion, nil
+}
+
+// upgrade OS
+func (dm *dpkgManager) upgradeOS(ctx context.Context) (*llb.State, []byte, error){
+	imageStateCurrent := dm.config.ImageState
+	if dm.config.PatchedConfigData != nil {
+		imageStateCurrent = dm.config.PatchedImageState
+	}
+
+	aptGetUpdated := imageStateCurrent.Run(
+		llb.Shlex("cp -a /etc /etc.bak"),
+		llb.WithProxy(utils.GetProxy()),
+		llb.IgnoreCache,
+	).Root()
+
+	aptGetUpdated = aptGetUpdated.Run(
+		llb.Shlex("cp -a /home /home.bak"),
+		llb.WithProxy(utils.GetProxy()),
+		llb.IgnoreCache,
+	).Root()
+	
+	aptGetInstalled := aptGetUpdated.Run(
+		llb.Shlex("sed -i 's/bullseye/bookworm/g' /etc/apt/sources.list"),
+		llb.WithProxy(utils.GetProxy()),
+		llb.IgnoreCache,
+	).Root()
+
+	installCmd := `sh -c "output=$(apt-get update -y && apt-get upgrade --without-new-pkgs -y && apt-get full-upgrade -y && apt-get clean -y && apt-get autoremove -y 2>&1); if [ $? -ne 0 ]; then echo "$output" >>error_log.txt; fi"`
+
+	aptGetInstalled = aptGetInstalled.Run(llb.Shlex(installCmd), llb.WithProxy(utils.GetProxy())).Root()
+	
+	// Write results.manifest to host for post-patch validation
+	const outputResultsTemplate = `sh -c 'grep "^Package:\|^Version:" "%s" >> "%s"'`
+	outputResultsCmd := fmt.Sprintf(outputResultsTemplate, dpkgStatusPath, resultManifest)
+	resultsWritten := aptGetInstalled.Dir(resultsPath).Run(llb.Shlex(outputResultsCmd)).Root()
+	resultsDiff := llb.Diff(aptGetInstalled, resultsWritten)
+
+	resultsBytes, err := buildkit.ExtractFileFromState(ctx, dm.config.Client, &resultsDiff, filepath.Join(resultsPath, resultManifest))
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Diff the installed updates and merge that into the target image
+	patchDiff := llb.Diff(aptGetUpdated, aptGetInstalled)
+	patchMerge := llb.Merge([]llb.State{dm.config.ImageState, patchDiff})
+
+	return &patchMerge, resultsBytes, nil
 }
 
 // Patch a regular debian image with:
